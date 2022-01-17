@@ -163,8 +163,8 @@ raiseTransportError = TransportErrorSupplier()
 
 
 class TransportClient:
-    def __init__(self, response=None, force_error=False, error=elasticsearch.TransportError):
-        self._response = response
+    def __init__(self, responses=None, force_error=False, error=elasticsearch.TransportError):
+        self._responses = responses
         self._force_error = force_error
         self._error = error
 
@@ -172,7 +172,11 @@ class TransportClient:
         if self._force_error:
             raise self._error
         else:
-            return self._response
+            if len(self._responses) > 0:
+                return self._responses.pop(0)
+            else:
+                return {}
+
 
 
 class JfrTests(TestCase):
@@ -320,361 +324,200 @@ class CcrStatsTests(TestCase):
 
 
 class CcrStatsRecorderTests(TestCase):
-    java_signed_maxlong = (2**63) - 1
-
-    def test_raises_exception_on_transport_error(self):
-        client = Client(transport_client=TransportClient(response={}, force_error=True))
-        cfg = create_config()
-        metrics_store = metrics.OsMetricsStore(cfg)
-        with self.assertRaisesRegex(exceptions.BenchmarkError,
-                                    r"A transport error occurred while collecting CCR stats from the endpoint "
-                                    r"\[/_ccr/stats\?filter_path=follow_stats\] on "
-                                    r"cluster \[remote\]"):
-            telemetry.CcrStatsRecorder(cluster_name="remote", client=client, metrics_store=metrics_store, sample_interval=1).record()
+    def replication_status_response(self, index_name, leader_checkpoint=-1, follower_checkpoint=-1, is_syncing=True):
+        return {
+            "status" : "SYNCING" if is_syncing else "",
+            "reason" : "User initiated",
+            "leader_alias" : "source",
+            "leader_index" : index_name,
+            "follower_index" : index_name,
+            "syncing_details" : {
+                "leader_checkpoint" : leader_checkpoint,
+                "follower_checkpoint" : follower_checkpoint,
+                "seq_no" : follower_checkpoint
+            }
+        }
 
     @mock.patch("osbenchmark.metrics.OsMetricsStore.put_doc")
     def test_stores_default_ccr_stats(self, metrics_store_put_doc):
-        java_signed_maxlong = CcrStatsRecorderTests.java_signed_maxlong
-
-        shard_id = random.randint(0, 999)
-        remote_cluster = "leader_cluster"
-        leader_index = "leader"
-        follower_index = "follower"
-        leader_global_checkpoint = random.randint(0, java_signed_maxlong)
-        leader_max_seq_no = random.randint(0, java_signed_maxlong)
-        follower_global_checkpoint = random.randint(0, java_signed_maxlong)
-        follower_max_seq_no = random.randint(0, java_signed_maxlong)
-        last_requested_seq_no = random.randint(0, java_signed_maxlong)
-        outstanding_read_requests = random.randint(0, java_signed_maxlong)
-        outstanding_write_requests = random.randint(0, java_signed_maxlong)
-        write_buffer_operation_count = random.randint(0, java_signed_maxlong)
-        follower_mapping_version = random.randint(0, java_signed_maxlong)
-        total_read_time_millis = random.randint(0, java_signed_maxlong)
-        total_read_remote_exec_time_millis = random.randint(0, java_signed_maxlong)
-        successful_read_requests = random.randint(0, java_signed_maxlong)
-        failed_read_requests = random.randint(0, java_signed_maxlong)
-        operations_read = random.randint(0, java_signed_maxlong)
-        bytes_read = random.randint(0, java_signed_maxlong)
-        total_write_time_millis = random.randint(0, java_signed_maxlong)
-        successful_write_requests = random.randint(0, java_signed_maxlong)
-        failed_write_requests = random.randint(0, java_signed_maxlong)
-        operations_written = random.randint(0, java_signed_maxlong)
-        read_exceptions = []
-        time_since_last_read_millis = random.randint(0, java_signed_maxlong)
-
-        ccr_stats_follower_response = {
-            "auto_follow_stats": {
-                "number_of_failed_follow_indices": 0,
-                "number_of_failed_remote_cluster_state_requests": 0,
-                "number_of_successful_follow_indices": 0,
-                "recent_auto_follow_errors": []
-            },
-            "follow_stats": {
-                "indices": [
-                    {
-                        "index": follower_index,
-                        "shards": [
-                            {
-                                "shard_id": shard_id,
-                                "remote_cluster": remote_cluster,
-                                "leader_index": leader_index,
-                                "follower_index": follower_index,
-                                "leader_global_checkpoint": leader_global_checkpoint,
-                                "leader_max_seq_no": leader_max_seq_no,
-                                "follower_global_checkpoint": follower_global_checkpoint,
-                                "follower_max_seq_no": follower_max_seq_no,
-                                "last_requested_seq_no": last_requested_seq_no,
-                                "outstanding_read_requests": outstanding_read_requests,
-                                "outstanding_write_requests": outstanding_write_requests,
-                                "write_buffer_operation_count": write_buffer_operation_count,
-                                "follower_mapping_version": follower_mapping_version,
-                                "total_read_time_millis": total_read_time_millis,
-                                "total_read_remote_exec_time_millis": total_read_remote_exec_time_millis,
-                                "successful_read_requests": successful_read_requests,
-                                "failed_read_requests": failed_read_requests,
-                                "operations_read": operations_read,
-                                "bytes_read": bytes_read,
-                                "total_write_time_millis": total_write_time_millis,
-                                "successful_write_requests": successful_write_requests,
-                                "failed_write_requests": failed_write_requests,
-                                "operations_written": operations_written,
-                                "read_exceptions": read_exceptions,
-                                "time_since_last_read_millis": time_since_last_read_millis,
-                            }
-                        ]
-                    }
-                ]
-            }
-        }
-
-        ccr_stats_filtered_follower_response = {"follow_stats": ccr_stats_follower_response["follow_stats"]}
-
-        client = Client(transport_client=TransportClient(response=ccr_stats_filtered_follower_response))
+        index_name = "test_index"
+        mock_responses = [  self.replication_status_response(index_name, 0, 0),
+                            self.replication_status_response(index_name, 2, 1),
+                            self.replication_status_response(index_name, 3, 1)]
+        client = Client(transport_client=TransportClient(responses=mock_responses))
         cfg = create_config()
         metrics_store = metrics.OsMetricsStore(cfg)
-        recorder = telemetry.CcrStatsRecorder(cluster_name="remote", client=client, metrics_store=metrics_store, sample_interval=1)
-        recorder.record()
+        recorder = telemetry.CcrStatsRecorder(cluster_name="follower", indices=[index_name], client=client,
+                    metrics_store=metrics_store, sample_interval=1)
 
-        shard_metadata = {
-            "cluster": "remote",
-            "index": follower_index
+        index_metadata = {
+            "cluster": "follower",
+            "index": index_name
         }
 
+        recorder.record()
+        metrics_store_put_doc.assert_called_with(
+                    {
+                        "name": "ccr-status",
+                        "index": index_name,
+                        "leader_checkpoint": 0,
+                        "follower_checkpoint": 0,
+                        "replication_lag": 0
+                    },
+                    level=MetaInfoScope.cluster,
+                    meta_data=index_metadata
+                )
+
+        recorder.record()
         metrics_store_put_doc.assert_called_with(
             {
-                "name": "ccr-stats",
-                "shard": ccr_stats_filtered_follower_response["follow_stats"]["indices"][0]["shards"][0]
+                "name": "ccr-status",
+                "index": index_name,
+                "leader_checkpoint": 2,
+                "follower_checkpoint": 1,
+                "replication_lag": 1
             },
             level=MetaInfoScope.cluster,
-            meta_data=shard_metadata
+            meta_data=index_metadata
+        )
+
+        recorder.record()
+        metrics_store_put_doc.assert_called_with(
+            {
+                "name": "ccr-status",
+                "index": index_name,
+                "leader_checkpoint": 3,
+                "follower_checkpoint": 1,
+                "replication_lag": 2
+            },
+            level=MetaInfoScope.cluster,
+            meta_data=index_metadata
+        )
+
+
+    @mock.patch("osbenchmark.metrics.OsMetricsStore.put_doc")
+    def test_verify_lag_when_checkpoint_is_negative(self, metrics_store_put_doc):
+        index_name = "test_index"
+        mock_responses = [  self.replication_status_response(index_name, -1, -1),
+                            self.replication_status_response(index_name, -1, -1),
+                            self.replication_status_response(index_name, -1, -1)]
+        index_metadata = {
+            "cluster": "follower",
+            "index": index_name
+        }
+        client = Client(transport_client=TransportClient(responses=mock_responses))
+        cfg = create_config()
+        metrics_store = metrics.OsMetricsStore(cfg)
+        recorder = telemetry.CcrStatsRecorder(cluster_name="follower", indices=[index_name], client=client,
+                    metrics_store=metrics_store, sample_interval=1)
+        recorder.record()
+        recorder.record()
+        recorder.record()
+        metrics_store_put_doc.assert_called_with(
+            {
+                "name": "ccr-status",
+                "index": index_name,
+                "leader_checkpoint": -1,
+                "follower_checkpoint": -1,
+                "replication_lag": 0
+            },
+            level=MetaInfoScope.cluster,
+            meta_data=index_metadata
+        )
+
+
+    @mock.patch("osbenchmark.metrics.OsMetricsStore.put_doc")
+    def test_max_supported_replication_lag(self, metrics_store_put_doc):
+        index_name = "test_index"
+        mock_responses = [  self.replication_status_response(index_name, 5, 1),
+                            self.replication_status_response(index_name, 6, 2),
+                            self.replication_status_response(index_name, 7, 3),
+                            self.replication_status_response(index_name, 8, 4)]
+        client = Client(transport_client=TransportClient(responses=mock_responses))
+        cfg = create_config()
+        metrics_store = metrics.OsMetricsStore(cfg)
+        recorder = telemetry.CcrStatsRecorder(cluster_name="follower", indices=[index_name], client=client,
+                    metrics_store=metrics_store, sample_interval=1, max_replication_lag_seconds=3)
+
+        index_metadata = {
+            "cluster": "follower",
+            "index": index_name
+        }
+
+        recorder.record()
+        recorder.record()
+        recorder.record()
+        recorder.record()
+
+        # Actual lag is 4 seconds but the configured upper cap is 3.
+        metrics_store_put_doc.assert_called_with(
+            {
+                "name": "ccr-status",
+                "index": index_name,
+                "leader_checkpoint": 8,
+                "follower_checkpoint": 4,
+                "replication_lag": 3
+            },
+            level=MetaInfoScope.cluster,
+            meta_data=index_metadata
         )
 
     @mock.patch("osbenchmark.metrics.OsMetricsStore.put_doc")
-    def test_stores_default_ccr_stats_many_shards(self, metrics_store_put_doc):
-        java_signed_maxlong = CcrStatsRecorderTests.java_signed_maxlong
-
-        remote_cluster = "leader_cluster"
-        leader_index = "leader"
-        follower_index = "follower"
-        shard_range = range(2)
-        leader_global_checkpoint = [random.randint(0, java_signed_maxlong) for _ in shard_range]
-        leader_max_seq_no = [random.randint(0, java_signed_maxlong) for _ in shard_range]
-        follower_global_checkpoint = [random.randint(0, java_signed_maxlong) for _ in shard_range]
-        follower_max_seq_no = [random.randint(0, java_signed_maxlong) for _ in shard_range]
-        last_requested_seq_no = [random.randint(0, java_signed_maxlong) for _ in shard_range]
-        outstanding_read_requests = [random.randint(0, java_signed_maxlong) for _ in shard_range]
-        outstanding_write_requests = [random.randint(0, java_signed_maxlong) for _ in shard_range]
-        write_buffer_operation_count = [random.randint(0, java_signed_maxlong) for _ in shard_range]
-        follower_mapping_version = [random.randint(0, java_signed_maxlong) for _ in shard_range]
-        total_read_time_millis = [random.randint(0, java_signed_maxlong) for _ in shard_range]
-        total_read_remote_exec_time_millis = [random.randint(0, java_signed_maxlong) for _ in shard_range]
-        successful_read_requests = [random.randint(0, java_signed_maxlong) for _ in shard_range]
-        failed_read_requests = [random.randint(0, java_signed_maxlong) for _ in shard_range]
-        operations_read = [random.randint(0, java_signed_maxlong) for _ in shard_range]
-        bytes_read = [random.randint(0, java_signed_maxlong) for _ in shard_range]
-        total_write_time_millis = [random.randint(0, java_signed_maxlong) for _ in shard_range]
-        successful_write_requests = [random.randint(0, java_signed_maxlong) for _ in shard_range]
-        failed_write_requests = [random.randint(0, java_signed_maxlong) for _ in shard_range]
-        operations_written = [random.randint(0, java_signed_maxlong) for _ in shard_range]
-        read_exceptions = [[] for _ in shard_range]
-        time_since_last_read_millis = [random.randint(0, java_signed_maxlong) for _ in shard_range]
-
-        ccr_stats_follower_response = {
-            "auto_follow_stats": {
-                "number_of_failed_follow_indices": 0,
-                "number_of_failed_remote_cluster_state_requests": 0,
-                "number_of_successful_follow_indices": 0,
-                "recent_auto_follow_errors": []
-            },
-            "follow_stats": {
-                "indices": [
-                    {
-                        "index": follower_index,
-                        "shards": [
-                            {
-                                "shard_id": shard_id,
-                                "remote_cluster": remote_cluster,
-                                "leader_index": leader_index,
-                                "follower_index": follower_index,
-                                "leader_global_checkpoint": leader_global_checkpoint[shard_id],
-                                "leader_max_seq_no": leader_max_seq_no[shard_id],
-                                "follower_global_checkpoint": follower_global_checkpoint[shard_id],
-                                "follower_max_seq_no": follower_max_seq_no[shard_id],
-                                "last_requested_seq_no": last_requested_seq_no[shard_id],
-                                "outstanding_read_requests": outstanding_read_requests[shard_id],
-                                "outstanding_write_requests": outstanding_write_requests[shard_id],
-                                "write_buffer_operation_count": write_buffer_operation_count[shard_id],
-                                "follower_mapping_version": follower_mapping_version[shard_id],
-                                "total_read_time_millis": total_read_time_millis[shard_id],
-                                "total_read_remote_exec_time_millis": total_read_remote_exec_time_millis[shard_id],
-                                "successful_read_requests": successful_read_requests[shard_id],
-                                "failed_read_requests": failed_read_requests[shard_id],
-                                "operations_read": operations_read[shard_id],
-                                "bytes_read": bytes_read[shard_id],
-                                "total_write_time_millis": total_write_time_millis[shard_id],
-                                "successful_write_requests": successful_write_requests[shard_id],
-                                "failed_write_requests": failed_write_requests[shard_id],
-                                "operations_written": operations_written[shard_id],
-                                "read_exceptions": read_exceptions[shard_id],
-                                "time_since_last_read_millis": time_since_last_read_millis[shard_id],
-                            } for shard_id in shard_range
-                        ]
-                    }
-                ]
-            }
-        }
-
-        ccr_stats_filtered_follower_response = {"follow_stats": ccr_stats_follower_response["follow_stats"]}
-
-        client = Client(transport_client=TransportClient(response=ccr_stats_filtered_follower_response))
+    def test_replication_lag_with_different_sample_interval(self, metrics_store_put_doc):
+        index_name = "test_index"
+        mock_responses = [  self.replication_status_response(index_name, 5, 1),
+                            self.replication_status_response(index_name, 6, 2),
+                            self.replication_status_response(index_name, 7, 3),
+                            self.replication_status_response(index_name, 8, 4)]
+        client = Client(transport_client=TransportClient(responses=mock_responses))
         cfg = create_config()
         metrics_store = metrics.OsMetricsStore(cfg)
-        recorder = telemetry.CcrStatsRecorder("remote", client, metrics_store, 1)
+        recorder = telemetry.CcrStatsRecorder(cluster_name="follower", indices=[index_name], client=client,
+                    metrics_store=metrics_store, sample_interval=2)
+
+        index_metadata = {
+            "cluster": "follower",
+            "index": index_name
+        }
+
+        recorder.record()
+        recorder.record()
+        recorder.record()
         recorder.record()
 
-        shard_metadata = [
+        # Actual lag is 4 seconds but the configured upper cap is 3.
+        metrics_store_put_doc.assert_called_with(
             {
-                "cluster": "remote",
-                "index": "follower"
+                "name": "ccr-status",
+                "index": index_name,
+                "leader_checkpoint": 8,
+                "follower_checkpoint": 4,
+                "replication_lag": 8
             },
-            {
-                "cluster": "remote",
-                "index": "follower"
-            }
-        ]
-
-        metrics_store_put_doc.assert_has_calls([
-            mock.call(
-                {
-                    "name": "ccr-stats",
-                    "shard": ccr_stats_filtered_follower_response["follow_stats"]["indices"][0]["shards"][0]
-                },
-                level=MetaInfoScope.cluster,
-                meta_data=shard_metadata[0]),
-            mock.call(
-                {
-                    "name": "ccr-stats",
-                    "shard": ccr_stats_filtered_follower_response["follow_stats"]["indices"][0]["shards"][1]
-                },
-                level=MetaInfoScope.cluster,
-                meta_data=shard_metadata[1])
-            ],
-            any_order=True
+            level=MetaInfoScope.cluster,
+            meta_data=index_metadata
         )
+
+    def test_ccr_exception_on_transport_error(self):
+        index_name = "test_index"
+        client = Client(transport_client=TransportClient(responses=[], force_error=True))
+        metrics_store = metrics.OsMetricsStore(create_config())
+        with self.assertRaisesRegex(exceptions.BenchmarkError,
+                                    r"A transport error occurred while collecting CCR stats for remote cluster: remote"):
+            telemetry.CcrStatsRecorder(cluster_name="remote", indices=[index_name], client=client,
+            metrics_store=metrics_store, sample_interval=1).record()
 
     @mock.patch("osbenchmark.metrics.OsMetricsStore.put_doc")
-    def test_stores_filtered_ccr_stats(self, metrics_store_put_doc):
-        java_signed_maxlong = CcrStatsRecorderTests.java_signed_maxlong
+    def test_ccr_status_when_not_syncing(self, metrics_store_put_doc):
+        index_name = "test_index"
+        mock_responses = [self.replication_status_response(index_name, 0, 0, False)]
+        client = Client(transport_client=TransportClient(responses=mock_responses))
+        metrics_store = metrics.OsMetricsStore(create_config())
+        recorder = telemetry.CcrStatsRecorder(cluster_name="follower", indices=[index_name], client=client,
+                    metrics_store=metrics_store, sample_interval=1)
 
-        remote_cluster = "leader_cluster"
-        leader_index1 = "leader1"
-        follower_index1 = "follower1"
-        leader_index2 = "leader2"
-        follower_index2 = "follower2"
-        leader_global_checkpoint = random.randint(0, java_signed_maxlong)
-        leader_max_seq_no = random.randint(0, java_signed_maxlong)
-        follower_global_checkpoint = random.randint(0, java_signed_maxlong)
-        follower_max_seq_no = random.randint(0, java_signed_maxlong)
-        last_requested_seq_no = random.randint(0, java_signed_maxlong)
-        outstanding_read_requests = random.randint(0, java_signed_maxlong)
-        outstanding_write_requests = random.randint(0, java_signed_maxlong)
-        write_buffer_operation_count = random.randint(0, java_signed_maxlong)
-        follower_mapping_version = random.randint(0, java_signed_maxlong)
-        total_read_time_millis = random.randint(0, java_signed_maxlong)
-        total_read_remote_exec_time_millis = random.randint(0, java_signed_maxlong)
-        successful_read_requests = random.randint(0, java_signed_maxlong)
-        failed_read_requests = random.randint(0, java_signed_maxlong)
-        operations_read = random.randint(0, java_signed_maxlong)
-        bytes_read = random.randint(0, java_signed_maxlong)
-        total_write_time_millis = random.randint(0, java_signed_maxlong)
-        successful_write_requests = random.randint(0, java_signed_maxlong)
-        failed_write_requests = random.randint(0, java_signed_maxlong)
-        operations_written = random.randint(0, java_signed_maxlong)
-        read_exceptions = []
-        time_since_last_read_millis = random.randint(0, java_signed_maxlong)
-
-        ccr_stats_follower_response = {
-            "auto_follow_stats": {
-                "number_of_failed_follow_indices": 0,
-                "number_of_failed_remote_cluster_state_requests": 0,
-                "number_of_successful_follow_indices": 0,
-                "recent_auto_follow_errors": []
-            },
-            "follow_stats": {
-                "indices": [
-                    {
-                        "index": follower_index1,
-                        "shards": [
-                            {
-                                "shard_id": 0,
-                                "remote_cluster": remote_cluster,
-                                "leader_index": leader_index1,
-                                "follower_index": follower_index1,
-                                "leader_global_checkpoint": leader_global_checkpoint,
-                                "leader_max_seq_no": leader_max_seq_no,
-                                "follower_global_checkpoint": follower_global_checkpoint,
-                                "follower_max_seq_no": follower_max_seq_no,
-                                "last_requested_seq_no": last_requested_seq_no,
-                                "outstanding_read_requests": outstanding_read_requests,
-                                "outstanding_write_requests": outstanding_write_requests,
-                                "write_buffer_operation_count": write_buffer_operation_count,
-                                "follower_mapping_version": follower_mapping_version,
-                                "total_read_time_millis": total_read_time_millis,
-                                "total_read_remote_exec_time_millis": total_read_remote_exec_time_millis,
-                                "successful_read_requests": successful_read_requests,
-                                "failed_read_requests": failed_read_requests,
-                                "operations_read": operations_read,
-                                "bytes_read": bytes_read,
-                                "total_write_time_millis": total_write_time_millis,
-                                "successful_write_requests": successful_write_requests,
-                                "failed_write_requests": failed_write_requests,
-                                "operations_written": operations_written,
-                                "read_exceptions": read_exceptions,
-                                "time_since_last_read_millis": time_since_last_read_millis,
-                            }
-                        ]
-                    },
-                    {
-                        "index": follower_index2,
-                        "shards": [
-                            {
-                                "shard_id": 0,
-                                "remote_cluster": remote_cluster,
-                                "leader_index": leader_index2,
-                                "follower_index": follower_index2,
-                                "leader_global_checkpoint": leader_global_checkpoint,
-                                "leader_max_seq_no": leader_max_seq_no,
-                                "follower_global_checkpoint": follower_global_checkpoint,
-                                "follower_max_seq_no": follower_max_seq_no,
-                                "last_requested_seq_no": last_requested_seq_no,
-                                "outstanding_read_requests": outstanding_read_requests,
-                                "outstanding_write_requests": outstanding_write_requests,
-                                "write_buffer_operation_count": write_buffer_operation_count,
-                                "follower_mapping_version": follower_mapping_version,
-                                "total_read_time_millis": total_read_time_millis,
-                                "total_read_remote_exec_time_millis": total_read_remote_exec_time_millis,
-                                "successful_read_requests": successful_read_requests,
-                                "failed_read_requests": failed_read_requests,
-                                "operations_read": operations_read,
-                                "bytes_read": bytes_read,
-                                "total_write_time_millis": total_write_time_millis,
-                                "successful_write_requests": successful_write_requests,
-                                "failed_write_requests": failed_write_requests,
-                                "operations_written": operations_written,
-                                "read_exceptions": read_exceptions,
-                                "time_since_last_read_millis": time_since_last_read_millis,
-                            }
-
-                        ]
-                    }
-                ]
-            }
-        }
-
-        ccr_stats_filtered_follower_response = {"follow_stats": ccr_stats_follower_response["follow_stats"]}
-        client = Client(transport_client=TransportClient(response=ccr_stats_follower_response))
-        cfg = create_config()
-        metrics_store = metrics.OsMetricsStore(cfg)
-        recorder = telemetry.CcrStatsRecorder("remote", client, metrics_store, 1, indices=[follower_index1])
         recorder.record()
-
-        shard_metadata = {
-            "cluster": "remote",
-            "index": follower_index1
-        }
-
-        metrics_store_put_doc.assert_has_calls([
-            mock.call(
-                {
-                    "name": "ccr-stats",
-                    "shard": ccr_stats_filtered_follower_response["follow_stats"]["indices"][0]["shards"][0]
-                },
-                level=MetaInfoScope.cluster,
-                meta_data=shard_metadata)
-            ],
-            any_order=True
-        )
-
+        assert metrics_store_put_doc.call_count == 0
 
 class RecoveryStatsTests(TestCase):
     @mock.patch("osbenchmark.metrics.OsMetricsStore.put_doc")
@@ -1262,10 +1105,9 @@ class TestSearchableSnapshotsStats:
 
     @mock.patch("osbenchmark.metrics.OsMetricsStore.put_doc")
     def test_no_metrics_if_empty_searchable_snapshots_stats(self, metrics_store_put_doc):
-        response = {}
         cfg = create_config()
         metrics_store = metrics.OsMetricsStore(cfg)
-        client = Client(transport_client=TransportClient(response=response))
+        client = Client(transport_client=TransportClient(responses=[]))
         recorder = telemetry.SearchableSnapshotsStatsRecorder(
             cluster_name="default",
             client=client,
@@ -1313,7 +1155,7 @@ class TestSearchableSnapshotsStats:
 
         cfg = create_config()
         metrics_store = metrics.OsMetricsStore(cfg)
-        client = Client(transport_client=TransportClient(response=response))
+        client = Client(transport_client=TransportClient(responses=[response]))
 
         recorder = telemetry.SearchableSnapshotsStatsRecorder(
             cluster_name="leader",
@@ -1345,7 +1187,7 @@ class TestSearchableSnapshotsStats:
 
         cfg = create_config()
         metrics_store = metrics.OsMetricsStore(cfg)
-        client = Client(transport_client=TransportClient(response=response))
+        client = Client(transport_client=TransportClient(responses=[response]))
 
         recorder = telemetry.SearchableSnapshotsStatsRecorder(
             cluster_name="default",
